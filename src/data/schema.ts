@@ -37,6 +37,46 @@ export interface SqlClient {
 export async function migrate(db: SqlClient) {
   await db.execAsync('PRAGMA foreign_keys = ON;');
   const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  if ((version?.user_version ?? 0) > 1) throw new Error('This database requires a newer app version.');
+  if ((version?.user_version ?? 0) > 2) throw new Error('This database requires a newer app version.');
   if ((version?.user_version ?? 0) < 1) await db.withTransactionAsync(() => db.execAsync(SCHEMA));
+  if ((version?.user_version ?? 0) < 2) await db.withTransactionAsync(() => db.execAsync(SCHEMA_V2));
 }
+
+export const SCHEMA_V2 = `
+CREATE TABLE recurring (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK(kind IN ('income','expense')),
+  wallet_id INTEGER NOT NULL REFERENCES wallets(id) ON DELETE RESTRICT,
+  category_id INTEGER REFERENCES categories(id) ON DELETE RESTRICT,
+  source TEXT,
+  amount_cents INTEGER NOT NULL CHECK(amount_cents > 0 AND amount_cents <= 1000000000000),
+  description TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  frequency TEXT NOT NULL CHECK(frequency IN ('daily','weekly','monthly','yearly')),
+  end_date TEXT,
+  next_index INTEGER NOT NULL DEFAULT 0 CHECK(next_index >= 0),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+  CHECK((kind='income' AND source IS NOT NULL AND category_id IS NULL) OR
+        (kind='expense' AND category_id IS NOT NULL AND source IS NULL))
+);
+CREATE TABLE incomes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  wallet_id INTEGER NOT NULL REFERENCES wallets(id) ON DELETE RESTRICT,
+  amount_cents INTEGER NOT NULL CHECK(amount_cents > 0 AND amount_cents <= 1000000000000),
+  source TEXT NOT NULL,
+  description TEXT NOT NULL,
+  date TEXT NOT NULL,
+  recurring_id INTEGER REFERENCES recurring(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+ALTER TABLE expenses ADD COLUMN recurring_id INTEGER REFERENCES recurring(id) ON DELETE SET NULL;
+CREATE TABLE recurring_occurrences (
+  recurring_id INTEGER NOT NULL REFERENCES recurring(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('posted','skipped')),
+  PRIMARY KEY (recurring_id,date)
+);
+CREATE INDEX incomes_date_idx ON incomes(date DESC,id DESC);
+CREATE INDEX incomes_wallet_idx ON incomes(wallet_id);
+PRAGMA user_version = 2;
+`;

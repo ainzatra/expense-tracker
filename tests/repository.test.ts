@@ -15,7 +15,7 @@ test('migration is repeatable, retains data, and rejects newer database versions
     await f.write({ name: 'create_wallet', arguments: { name: 'Cash', opening_balance: '1000' } });
     await migrate(f.client);
     const s = await f.repo.snapshot(); assert.equal(s.wallets.length, 1); assert.equal(s.categories.length, 6);
-    await f.client.execAsync('PRAGMA user_version = 2');
+    await f.client.execAsync('PRAGMA user_version = 3');
     await assert.rejects(migrate(f.client), /newer app/);
   } finally { f.close(); }
 });

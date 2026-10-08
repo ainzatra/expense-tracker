@@ -39,7 +39,7 @@ test('custom providers use their configured HTTPS endpoint and never inherit Ope
 });
 
 test('provider errors are actionable without exposing response bodies or retrying paid requests', async () => {
-  for (const [status, pattern] of [[401, /API key/], [402, /credits/], [429, /rate limit/], [400, /JSON responses/], [503, /unavailable/]] as const) {
+  for (const [status, pattern] of [[401, /API key/], [402, /credits/], [429, /rate limit/], [400, /tool calling/], [503, /unavailable/]] as const) {
     let requests = 0;
     const infer = createOnlineInference(config, async () => {
       requests++; return new Response(JSON.stringify({ error: { message: 'test-only-key' } }), { status });

@@ -12,7 +12,7 @@ test('agent expense tool produces a reviewable proposal and only confirmation pe
   } finally { f.close(); }
 });
 
-test('agent executes read tools then feeds results back to local inference', async () => {
+test('agent executes read tools then feeds results back to inference', async () => {
   const f = await fixture(); try {
     let calls = 0;
     const result = await runAgent(f.repo, async messages => {
@@ -47,7 +47,7 @@ test('agent limits repeated read calls instead of looping indefinitely', async (
   const f = await fixture(); try {
     let calls = 0;
     const result = await runAgent(f.repo, async () => { calls++; return JSON.stringify({ reply: '', tool: { name: 'list_wallets', arguments: {} } }); }, 'List wallets', []);
-    assert.equal(calls, 3); assert.match(result.reply, /narrow/);
+    assert.equal(calls, 6); assert.match(result.reply, /narrow/);
   } finally { f.close(); }
 });
 

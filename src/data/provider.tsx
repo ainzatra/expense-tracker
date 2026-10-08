@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useSQLiteContext } from 'expo-sqlite';
+import { AppState } from 'react-native';
 import { Repository, type Proposal, type Snapshot } from './repository';
 import type { WriteCall } from './tools';
 
@@ -18,8 +19,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let active = true;
     void repo.snapshot().then(value => { if (active) { setData(value); setError(null); } }, e => { if (active) setError(e instanceof Error ? e.message : 'Could not read local data.'); });
-    return () => { active = false; };
-  }, [repo]);
+    const listener = AppState.addEventListener('change', state => { if (state === 'active') void refresh().catch(() => undefined); });
+    const timer = setInterval(() => { void refresh().catch(() => undefined); }, 60000);
+    return () => { active = false; listener.remove(); clearInterval(timer); };
+  }, [repo, refresh]);
   const apply = useCallback(async (proposal: Proposal) => { const result = await repo.apply(proposal); await refresh(); return result; }, [repo, refresh]);
   const change = useCallback(async (call: WriteCall) => apply(await repo.propose(call)), [repo, apply]);
   return <DataContext.Provider value={{ repo, data, error, refresh, change, apply }}>{children}</DataContext.Provider>;
