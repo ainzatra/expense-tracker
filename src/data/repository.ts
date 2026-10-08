@@ -40,6 +40,9 @@ export class Repository {
       await this.db.runAsync('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'model_name', name);
     }));
   }
+  clearModel() {
+    return this.serial(() => this.db.runAsync("DELETE FROM settings WHERE key IN ('model_path','model_name')"));
+  }
   async read(input: ToolCall): Promise<unknown> {
     const call = toolSchema.parse(input);
     if (isWrite(call)) throw new Error('Changes require a reviewed proposal.');

@@ -7,7 +7,7 @@ type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 export type Inference = (messages: ChatMessage[], signal?: AbortSignal) => Promise<string>;
 
 export function systemPrompt(snapshot: Snapshot) {
-  return `You are Pocket Ledger, a local expense assistant. Today is ${localDay()}; currency is ${snapshot.currency}.
+  return `You are Pocket Ledger, an expense assistant. Today is ${localDay()}; currency is ${snapshot.currency}.
 Respond ONLY with JSON {"reply":"short helpful text","tool":null OR {"name":"tool_name","arguments":{...}}}.
 Use at most one tool per response. Never execute SQL. Never invent ids, wallets, amounts, dates, or tool results.
 Writes are proposals requiring user review: NEVER claim a change was saved. Ask a question when the request is ambiguous or required information is missing.
@@ -31,7 +31,7 @@ export async function runAgent(repo: Repository, infer: Inference, text: string,
     if (signal?.aborted) throw new Error('Cancelled.');
     let output;
     try { output = agentOutputSchema.parse(JSON.parse(raw.trim())); }
-    catch { throw new Error('The model returned an invalid action. Nothing was changed. Try a clearer message or a different instruction model.'); }
+    catch { throw new Error('The AI returned an invalid action. Nothing was changed. Try a clearer message or a different chat model.'); }
     if (!output.tool) return { reply: output.reply || 'Please give me more details.' };
     if (isWrite(output.tool)) {
       const proposal = await repo.propose(output.tool);
