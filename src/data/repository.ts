@@ -1,24 +1,117 @@
 import type { SqlClient } from './schema';
+import {
+  and,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  gte,
+  inArray,
+  lte,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
+import { createDatabase } from './database';
+import * as t from './tables';
 import { isWrite, toolSchema, type ToolCall, type WriteCall } from './tools';
 import { decimal, localDay, money, toCents } from '../lib/money';
 import { occurrenceDate, type Frequency } from '../lib/recurrence';
 import type { OnlineSettings } from '../lib/ai/online';
 
-export type Wallet = { id: number; name: string; opening_cents: number; spent_cents: number; income_cents: number; balance_cents: number };
+export type Wallet = {
+  id: number;
+  name: string;
+  opening_cents: number;
+  spent_cents: number;
+  income_cents: number;
+  balance_cents: number;
+};
 export type Category = { id: number; name: string };
-export type Expense = { id: number; wallet_id: number; category_id: number; amount_cents: number; description: string; date: string; wallet_name: string; category_name: string };
-export type Income = { id: number; wallet_id: number; amount_cents: number; source: string; description: string; date: string; wallet_name: string; recurring_id: number | null };
-export type Recurring = { id: number; kind: 'income' | 'expense'; wallet_id: number; category_id: number | null; source: string | null; amount_cents: number; description: string; start_date: string; frequency: Frequency; end_date: string | null; next_index: number; enabled: number; wallet_name: string; category_name: string | null; next_date: string | null; due: boolean };
-export type Snapshot = { currency: string; revision: number; wallets: Wallet[]; categories: Category[]; expenses: Expense[]; expenseCount: number; incomes: Income[]; incomeCount: number; recurring: Recurring[]; modelPath: string | null; modelName: string | null };
-export type Proposal = { call: WriteCall; revision: number; title: string; details: string[]; destructive: boolean };
-
-const expenseSelect = `SELECT e.*, w.name wallet_name, c.name category_name FROM expenses e JOIN wallets w ON w.id=e.wallet_id JOIN categories c ON c.id=e.category_id`;
-const incomeSelect = `SELECT e.*, w.name wallet_name FROM incomes e JOIN wallets w ON w.id=e.wallet_id`;
+export type Expense = {
+  id: number;
+  wallet_id: number;
+  category_id: number;
+  amount_cents: number;
+  description: string;
+  date: string;
+  wallet_name: string;
+  category_name: string;
+};
+export type Income = {
+  id: number;
+  wallet_id: number;
+  amount_cents: number;
+  source: string;
+  description: string;
+  date: string;
+  wallet_name: string;
+  recurring_id: number | null;
+};
+export type Recurring = {
+  id: number;
+  kind: 'income' | 'expense';
+  wallet_id: number;
+  category_id: number | null;
+  source: string | null;
+  amount_cents: number;
+  description: string;
+  start_date: string;
+  frequency: Frequency;
+  end_date: string | null;
+  next_index: number;
+  enabled: number;
+  wallet_name: string;
+  category_name: string | null;
+  next_date: string | null;
+  due: boolean;
+};
+export type Snapshot = {
+  currency: string;
+  revision: number;
+  wallets: Wallet[];
+  categories: Category[];
+  expenses: Expense[];
+  expenseCount: number;
+  incomes: Income[];
+  incomeCount: number;
+  recurring: Recurring[];
+  modelPath: string | null;
+  modelName: string | null;
+};
+export type Proposal = {
+  call: WriteCall;
+  revision: number;
+  title: string;
+  details: string[];
+  destructive: boolean;
+};
 
 export class Repository {
   private queue: Promise<unknown> = Promise.resolve();
-  constructor(private db: SqlClient, private today = localDay) {}
-
+  private orm: ReturnType<typeof createDatabase>;
+  constructor(
+    private db: SqlClient,
+    private today = localDay,
+  ) {
+    this.orm = createDatabase(db);
+  }
+  private expenseQuery() {
+    return this.orm
+      .select({
+        ...getTableColumns(t.expenses),
+        wallet_name: t.wallets.name,
+        category_name: t.categories.name,
+      })
+      .from(t.expenses)
+      .innerJoin(t.wallets, eq(t.wallets.id, t.expenses.wallet_id))
+      .innerJoin(t.categories, eq(t.categories.id, t.expenses.category_id));
+  }
+  private incomeQuery() {
+    return this.orm
+      .select({ ...getTableColumns(t.incomes), wallet_name: t.wallets.name })
+      .from(t.incomes)
+      .innerJoin(t.wallets, eq(t.wallets.id, t.incomes.wallet_id));
+  }
   // Every database operation is serialized on one connection. Reviewed writes
   // recheck their revision inside the transaction, so stale proposals cannot overwrite edits.
   private serial<T>(task: () => Promise<T>): Promise<T> {
@@ -26,219 +119,707 @@ export class Repository {
     this.queue = next.catch(() => undefined);
     return next;
   }
-  private async setting(key: string) { return (await this.db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', key))?.value ?? null; }
+  private async setting(key: string) {
+    return (
+      this.orm.select().from(t.settings).where(eq(t.settings.key, key)).get()
+        ?.value ?? null
+    );
+  }
+  private setSetting(key: string, value: string) {
+    return this.orm
+      .insert(t.settings)
+      .values({ key, value })
+      .onConflictDoUpdate({ target: t.settings.key, set: { value } })
+      .run();
+  }
   private async wallets() {
-    return this.db.getAllAsync<Wallet>(`SELECT w.*,
-      COALESCE((SELECT SUM(amount_cents) FROM expenses WHERE wallet_id=w.id),0) spent_cents,
-      COALESCE((SELECT SUM(amount_cents) FROM incomes WHERE wallet_id=w.id),0) income_cents,
-      w.opening_cents+COALESCE((SELECT SUM(amount_cents) FROM incomes WHERE wallet_id=w.id),0)-COALESCE((SELECT SUM(amount_cents) FROM expenses WHERE wallet_id=w.id),0) balance_cents FROM wallets w ORDER BY w.id`);
+    // Keep the outer reference qualified inside correlated subqueries.
+    const walletId = sql`${sql.identifier('wallets')}.${sql.identifier('id')}`;
+    const spent = sql<number>`COALESCE((SELECT SUM(${t.expenses.amount_cents}) FROM ${t.expenses} WHERE ${t.expenses.wallet_id}=${walletId}),0)`;
+    const income = sql<number>`COALESCE((SELECT SUM(${t.incomes.amount_cents}) FROM ${t.incomes} WHERE ${t.incomes.wallet_id}=${walletId}),0)`;
+    return this.orm
+      .select({
+        ...getTableColumns(t.wallets),
+        spent_cents: spent.as('spent_cents'),
+        income_cents: income.as('income_cents'),
+        balance_cents:
+          sql<number>`${t.wallets.opening_cents}+${income}-${spent}`.as(
+            'balance_cents',
+          ),
+      })
+      .from(t.wallets)
+      .orderBy(t.wallets.id)
+      .all();
   }
   private async schedules() {
-    const rows = await this.db.getAllAsync<Recurring>('SELECT r.*,w.name wallet_name,c.name category_name FROM recurring r JOIN wallets w ON w.id=r.wallet_id LEFT JOIN categories c ON c.id=r.category_id ORDER BY r.id');
-    return rows.map(row => {
-      const next = occurrenceDate(row.start_date, row.next_index, row.frequency);
+    const rows = this.orm
+      .select({
+        ...getTableColumns(t.recurring),
+        wallet_name: t.wallets.name,
+        category_name: t.categories.name,
+      })
+      .from(t.recurring)
+      .innerJoin(t.wallets, eq(t.wallets.id, t.recurring.wallet_id))
+      .leftJoin(t.categories, eq(t.categories.id, t.recurring.category_id))
+      .orderBy(t.recurring.id)
+      .all();
+    return rows.map((row) => {
+      const next = occurrenceDate(
+        row.start_date,
+        row.next_index,
+        row.frequency,
+      );
       const next_date = row.end_date && next > row.end_date ? null : next;
-      return { ...row, next_date, due: !!row.enabled && !!next_date && next_date <= this.today() };
+      return {
+        ...row,
+        next_date,
+        due: !!row.enabled && !!next_date && next_date <= this.today(),
+      };
     });
   }
   getAiSettings(): Promise<OnlineSettings | null> {
-    return this.serial(async () => { const value = await this.setting('online_ai'); return value ? JSON.parse(value) as OnlineSettings : null; });
+    return this.serial(async () => {
+      const value = await this.setting('online_ai');
+      return value ? (JSON.parse(value) as OnlineSettings) : null;
+    });
   }
   saveAiSettings(settings: OnlineSettings) {
     // Explicit projection keeps API keys out of SQLite even if the caller has credentials.
-    const value = JSON.stringify({ provider: settings.provider, baseUrl: settings.baseUrl, model: settings.model });
-    return this.serial(() => this.db.runAsync('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'online_ai', value));
+    const value = JSON.stringify({
+      provider: settings.provider,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+    });
+    return this.serial(() =>
+      Promise.resolve(this.setSetting('online_ai', value)),
+    );
   }
   snapshot() {
     return this.serial(async (): Promise<Snapshot> => ({
-      currency: await this.setting('currency') ?? 'PHP', revision: Number(await this.setting('revision')),
-      wallets: await this.wallets(), categories: await this.db.getAllAsync<Category>('SELECT * FROM categories ORDER BY id'),
-      expenses: await this.db.getAllAsync<Expense>(`${expenseSelect} ORDER BY e.date DESC,e.id DESC LIMIT 100`),
-      expenseCount: (await this.db.getFirstAsync<{ n: number }>('SELECT COUNT(*) n FROM expenses'))!.n,
-      incomes: await this.db.getAllAsync<Income>(`${incomeSelect} ORDER BY e.date DESC,e.id DESC LIMIT 100`),
-      incomeCount: (await this.db.getFirstAsync<{ n: number }>('SELECT COUNT(*) n FROM incomes'))!.n,
+      currency: (await this.setting('currency')) ?? 'PHP',
+      revision: Number(await this.setting('revision')),
+      wallets: await this.wallets(),
+      categories: this.orm
+        .select()
+        .from(t.categories)
+        .orderBy(t.categories.id)
+        .all(),
+      expenses: this.expenseQuery()
+        .orderBy(desc(t.expenses.date), desc(t.expenses.id))
+        .limit(100)
+        .all(),
+      expenseCount: this.orm.select({ n: count() }).from(t.expenses).get()!.n,
+      incomes: this.incomeQuery()
+        .orderBy(desc(t.incomes.date), desc(t.incomes.id))
+        .limit(100)
+        .all(),
+      incomeCount: this.orm.select({ n: count() }).from(t.incomes).get()!.n,
       recurring: await this.schedules(),
-      modelPath: await this.setting('model_path'), modelName: await this.setting('model_name'),
+      modelPath: await this.setting('model_path'),
+      modelName: await this.setting('model_name'),
     }));
   }
   saveModel(path: string, name: string) {
-    return this.serial(() => this.db.withTransactionAsync(async () => {
-      await this.db.runAsync('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'model_path', path);
-      await this.db.runAsync('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'model_name', name);
-    }));
+    return this.serial(() =>
+      this.db.withTransactionAsync(async () => {
+        this.setSetting('model_path', path);
+        this.setSetting('model_name', name);
+      }),
+    );
   }
   clearModel() {
-    return this.serial(() => this.db.runAsync("DELETE FROM settings WHERE key IN ('model_path','model_name')"));
+    return this.serial(() =>
+      Promise.resolve(
+        this.orm
+          .delete(t.settings)
+          .where(inArray(t.settings.key, ['model_path', 'model_name']))
+          .run(),
+      ),
+    );
   }
   async read(input: ToolCall): Promise<unknown> {
     const call = toolSchema.parse(input);
     if (isWrite(call)) throw new Error('Changes require a reviewed proposal.');
     return this.serial(async () => {
-      if (call.name === 'list_wallets') return { currency: await this.setting('currency'), wallets: await this.wallets() };
-      if (call.name === 'list_recurring') return { recurring: await this.schedules() };
-      const a = call.arguments;
-      if (a.start && a.end && a.start > a.end) throw new Error('Start date must precede end date.');
-      const clauses: string[] = [], params: (number | string)[] = [];
-      if (a.start) { clauses.push('e.date>=?'); params.push(a.start); }
-      if (a.end) { clauses.push('e.date<=?'); params.push(a.end); }
-      if ('wallet_id' in a && a.wallet_id) { clauses.push('e.wallet_id=?'); params.push(a.wallet_id); }
-      const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
-      const table = call.name === 'list_incomes' ? 'incomes' : 'expenses';
-      const total = await this.db.getFirstAsync<{ count: number; total_cents: number }>(`SELECT COUNT(*) count,COALESCE(SUM(e.amount_cents),0) total_cents FROM ${table} e${where}`, ...params);
-      if (call.name === 'get_summary') {
-        const income = await this.db.getFirstAsync<{ income_count: number; income_cents: number }>(`SELECT COUNT(*) income_count,COALESCE(SUM(e.amount_cents),0) income_cents FROM incomes e${where}`, ...params);
+      if (call.name === 'list_wallets')
         return {
-        ...total, currency: await this.setting('currency'),
-        ...income, net_cents: (income?.income_cents ?? 0) - (total?.total_cents ?? 0),
-        categories: await this.db.getAllAsync<{ name: string; total_cents: number }>(`SELECT c.name, SUM(e.amount_cents) total_cents FROM expenses e JOIN categories c ON c.id=e.category_id${where} GROUP BY c.id ORDER BY total_cents DESC`, ...params),
-        income_sources: await this.db.getAllAsync<{ source: string; total_cents: number }>(`SELECT source,SUM(amount_cents) total_cents FROM incomes e${where} GROUP BY source ORDER BY total_cents DESC`, ...params),
-      }; }
+          currency: await this.setting('currency'),
+          wallets: await this.wallets(),
+        };
+      if (call.name === 'list_recurring')
+        return { recurring: await this.schedules() };
+      const a = call.arguments;
+      if (a.start && a.end && a.start > a.end)
+        throw new Error('Start date must precede end date.');
+      const where = (table: typeof t.expenses | typeof t.incomes) => {
+        const conditions: SQL[] = [];
+        if (a.start) conditions.push(gte(table.date, a.start));
+        if (a.end) conditions.push(lte(table.date, a.end));
+        if ('wallet_id' in a && a.wallet_id)
+          conditions.push(eq(table.wallet_id, a.wallet_id));
+        return and(...conditions);
+      };
+      const table = call.name === 'list_incomes' ? t.incomes : t.expenses;
+      const total = this.orm
+        .select({
+          count: count(),
+          total_cents: sql<number>`COALESCE(SUM(${table.amount_cents}),0)`.as(
+            'total_cents',
+          ),
+        })
+        .from(table)
+        .where(where(table))
+        .get()!;
+      if (call.name === 'get_summary') {
+        const income = this.orm
+          .select({
+            income_count: count(),
+            income_cents:
+              sql<number>`COALESCE(SUM(${t.incomes.amount_cents}),0)`.as(
+                'income_cents',
+              ),
+          })
+          .from(t.incomes)
+          .where(where(t.incomes))
+          .get()!;
+        return {
+          ...total,
+          currency: await this.setting('currency'),
+          ...income,
+          net_cents: income.income_cents - total.total_cents,
+          categories: this.orm
+            .select({
+              name: t.categories.name,
+              total_cents: sql<number>`SUM(${t.expenses.amount_cents})`.as(
+                'total_cents',
+              ),
+            })
+            .from(t.expenses)
+            .innerJoin(
+              t.categories,
+              eq(t.categories.id, t.expenses.category_id),
+            )
+            .where(where(t.expenses))
+            .groupBy(t.categories.id)
+            .orderBy(desc(sql`SUM(${t.expenses.amount_cents})`))
+            .all(),
+          income_sources: this.orm
+            .select({
+              source: t.incomes.source,
+              total_cents: sql<number>`SUM(${t.incomes.amount_cents})`.as(
+                'total_cents',
+              ),
+            })
+            .from(t.incomes)
+            .where(where(t.incomes))
+            .groupBy(t.incomes.source)
+            .orderBy(desc(sql`SUM(${t.incomes.amount_cents})`))
+            .all(),
+        };
+      }
       const { limit = 30, offset = 0 } = call.arguments;
-      const rows = await this.db.getAllAsync(`${table === 'incomes' ? incomeSelect : expenseSelect}${where} ORDER BY e.date DESC,e.id DESC LIMIT ? OFFSET ?`, ...params, limit, offset);
-      return { ...total, limit, offset, currency: await this.setting('currency'), [table]: rows };
+      const rows =
+        call.name === 'list_incomes'
+          ? this.incomeQuery()
+              .where(where(t.incomes))
+              .orderBy(desc(t.incomes.date), desc(t.incomes.id))
+              .limit(limit)
+              .offset(offset)
+              .all()
+          : this.expenseQuery()
+              .where(where(t.expenses))
+              .orderBy(desc(t.expenses.date), desc(t.expenses.id))
+              .limit(limit)
+              .offset(offset)
+              .all();
+      return {
+        ...total,
+        limit,
+        offset,
+        currency: await this.setting('currency'),
+        [call.name === 'list_incomes' ? 'incomes' : 'expenses']: rows,
+      };
     });
   }
-  private async mustExist(table: 'wallets' | 'categories' | 'expenses' | 'incomes' | 'recurring', id: number) {
-    const row = await this.db.getFirstAsync<{ id: number; name?: string; description?: string }>(`SELECT * FROM ${table} WHERE id=?`, id);
-    if (!row) throw new Error(`${({ expenses: 'Expense', wallets: 'Wallet', categories: 'Category', incomes: 'Income', recurring: 'Schedule' })[table]} no longer exists.`);
+  private async mustExist(
+    table: 'wallets' | 'categories' | 'expenses' | 'incomes' | 'recurring',
+    id: number,
+  ) {
+    const entity = {
+      wallets: t.wallets,
+      categories: t.categories,
+      expenses: t.expenses,
+      incomes: t.incomes,
+      recurring: t.recurring,
+    }[table];
+    const row = this.orm
+      .select()
+      .from(entity)
+      .where(eq(entity.id, id))
+      .get() as { id: number; name?: string; description?: string } | undefined;
+    if (!row)
+      throw new Error(
+        `${{ expenses: 'Expense', wallets: 'Wallet', categories: 'Category', incomes: 'Income', recurring: 'Schedule' }[table]} no longer exists.`,
+      );
     return row;
   }
-  private async inspect(call: WriteCall): Promise<Omit<Proposal, 'revision' | 'call'>> {
-    const currency = await this.setting('currency') ?? 'PHP';
+  private async inspect(
+    call: WriteCall,
+  ): Promise<Omit<Proposal, 'revision' | 'call'>> {
+    const currency = (await this.setting('currency')) ?? 'PHP';
     switch (call.name) {
       case 'configure_tracking': {
-        const count = await this.db.getFirstAsync<{ n: number }>('SELECT COUNT(*) n FROM wallets');
-        if (count!.n && call.arguments.currency !== currency) throw new Error('Currency cannot change after wallets are created. Existing amounts must keep their currency.');
-        return { title: 'Set tracking currency', details: [call.arguments.currency], destructive: false };
+        const walletCount = this.orm
+          .select({ n: count() })
+          .from(t.wallets)
+          .get();
+        if (walletCount!.n && call.arguments.currency !== currency)
+          throw new Error(
+            'Currency cannot change after wallets are created. Existing amounts must keep their currency.',
+          );
+        return {
+          title: 'Set tracking currency',
+          details: [call.arguments.currency],
+          destructive: false,
+        };
       }
-      case 'create_wallet': case 'update_wallet': {
-        const a = call.arguments, cents = toCents(a.opening_balance, true);
+      case 'create_wallet':
+      case 'update_wallet': {
+        const a = call.arguments,
+          cents = toCents(a.opening_balance, true);
         if ('id' in a) await this.mustExist('wallets', a.id);
-        const duplicate = await this.db.getFirstAsync<{ id: number }>('SELECT id FROM wallets WHERE name=? COLLATE NOCASE', a.name);
-        if (duplicate && (!('id' in a) || a.id !== duplicate.id)) throw new Error('A wallet with this name already exists.');
-        return { title: call.name === 'create_wallet' ? 'Create wallet' : 'Update wallet', details: [a.name, `Opening balance: ${money(cents, currency)}`], destructive: false };
+        const duplicate = this.orm
+          .select({ id: t.wallets.id })
+          .from(t.wallets)
+          .where(sql`${t.wallets.name} = ${a.name} COLLATE NOCASE`)
+          .get();
+        if (duplicate && (!('id' in a) || a.id !== duplicate.id))
+          throw new Error('A wallet with this name already exists.');
+        return {
+          title:
+            call.name === 'create_wallet' ? 'Create wallet' : 'Update wallet',
+          details: [a.name, `Opening balance: ${money(cents, currency)}`],
+          destructive: false,
+        };
       }
       case 'create_category': {
-        if (await this.db.getFirstAsync('SELECT id FROM categories WHERE name=? COLLATE NOCASE', call.arguments.name)) throw new Error('This category already exists.');
-        return { title: 'Create category', details: [call.arguments.name], destructive: false };
+        if (
+          this.orm
+            .select({ id: t.categories.id })
+            .from(t.categories)
+            .where(
+              sql`${t.categories.name} = ${call.arguments.name} COLLATE NOCASE`,
+            )
+            .get()
+        )
+          throw new Error('This category already exists.');
+        return {
+          title: 'Create category',
+          details: [call.arguments.name],
+          destructive: false,
+        };
       }
       case 'delete_wallet': {
         const w = await this.mustExist('wallets', call.arguments.id);
-        if (await this.db.getFirstAsync('SELECT id FROM expenses WHERE wallet_id=? LIMIT 1', w.id)) throw new Error('This wallet has expenses. Move or delete them before deleting the wallet.');
-        if (await this.db.getFirstAsync('SELECT id FROM incomes WHERE wallet_id=? LIMIT 1', w.id)) throw new Error('This wallet has income. Move or delete it before deleting the wallet.');
-        if (await this.db.getFirstAsync('SELECT id FROM recurring WHERE wallet_id=? LIMIT 1', w.id)) throw new Error('This wallet has recurring schedules. Move or delete them before deleting the wallet.');
-        return { title: 'Delete wallet', details: [w.name!], destructive: true };
+        if (
+          this.orm
+            .select({ id: t.expenses.id })
+            .from(t.expenses)
+            .where(eq(t.expenses.wallet_id, w.id))
+            .limit(1)
+            .get()
+        )
+          throw new Error(
+            'This wallet has expenses. Move or delete them before deleting the wallet.',
+          );
+        if (
+          this.orm
+            .select({ id: t.incomes.id })
+            .from(t.incomes)
+            .where(eq(t.incomes.wallet_id, w.id))
+            .limit(1)
+            .get()
+        )
+          throw new Error(
+            'This wallet has income. Move or delete it before deleting the wallet.',
+          );
+        if (
+          this.orm
+            .select({ id: t.recurring.id })
+            .from(t.recurring)
+            .where(eq(t.recurring.wallet_id, w.id))
+            .limit(1)
+            .get()
+        )
+          throw new Error(
+            'This wallet has recurring schedules. Move or delete them before deleting the wallet.',
+          );
+        return {
+          title: 'Delete wallet',
+          details: [w.name!],
+          destructive: true,
+        };
       }
-      case 'create_expense': case 'update_expense': {
-        const a = call.arguments, cents = toCents(a.amount);
+      case 'create_expense':
+      case 'update_expense': {
+        const a = call.arguments,
+          cents = toCents(a.amount);
         if ('id' in a) await this.mustExist('expenses', a.id);
-        const w = await this.mustExist('wallets', a.wallet_id), c = await this.mustExist('categories', a.category_id);
-        return { title: call.name === 'create_expense' ? 'Add expense' : 'Update expense', details: [a.description, `${money(cents, currency)} · ${w.name}`, `${c.name} · ${a.date}`], destructive: false };
+        const w = await this.mustExist('wallets', a.wallet_id),
+          c = await this.mustExist('categories', a.category_id);
+        return {
+          title:
+            call.name === 'create_expense' ? 'Add expense' : 'Update expense',
+          details: [
+            a.description,
+            `${money(cents, currency)} · ${w.name}`,
+            `${c.name} · ${a.date}`,
+          ],
+          destructive: false,
+        };
       }
       case 'delete_expense': {
-        const e = await this.db.getFirstAsync<Expense>(`${expenseSelect} WHERE e.id=?`, call.arguments.id);
+        const e = this.expenseQuery()
+          .where(eq(t.expenses.id, call.arguments.id))
+          .get();
         if (!e) throw new Error('Expense no longer exists.');
-        return { title: 'Delete expense', details: [e.description, `${money(e.amount_cents, currency)} · ${e.wallet_name}`, e.date], destructive: true };
+        return {
+          title: 'Delete expense',
+          details: [
+            e.description,
+            `${money(e.amount_cents, currency)} · ${e.wallet_name}`,
+            e.date,
+          ],
+          destructive: true,
+        };
       }
-      case 'create_income': case 'update_income': {
-        const a = call.arguments, cents = toCents(a.amount);
+      case 'create_income':
+      case 'update_income': {
+        const a = call.arguments,
+          cents = toCents(a.amount);
         if ('id' in a) await this.mustExist('incomes', a.id);
         const w = await this.mustExist('wallets', a.wallet_id);
-        return { title: call.name === 'create_income' ? 'Add income' : 'Update income', details: [a.description, `+${money(cents, currency)} · ${w.name}`, `${a.source} · ${a.date}`], destructive: false };
+        return {
+          title: call.name === 'create_income' ? 'Add income' : 'Update income',
+          details: [
+            a.description,
+            `+${money(cents, currency)} · ${w.name}`,
+            `${a.source} · ${a.date}`,
+          ],
+          destructive: false,
+        };
       }
       case 'delete_income': {
-        const income = await this.db.getFirstAsync<Income>(`${incomeSelect} WHERE e.id=?`, call.arguments.id);
+        const income = this.incomeQuery()
+          .where(eq(t.incomes.id, call.arguments.id))
+          .get();
         if (!income) throw new Error('Income no longer exists.');
-        return { title: 'Delete income', details: [income.description, `Remove ${money(income.amount_cents, currency)} from ${income.wallet_name}`, income.date], destructive: true };
+        return {
+          title: 'Delete income',
+          details: [
+            income.description,
+            `Remove ${money(income.amount_cents, currency)} from ${income.wallet_name}`,
+            income.date,
+          ],
+          destructive: true,
+        };
       }
-      case 'create_recurring': case 'update_recurring': {
-        const a = call.arguments, cents = toCents(a.amount);
+      case 'create_recurring':
+      case 'update_recurring': {
+        const a = call.arguments,
+          cents = toCents(a.amount);
         const w = await this.mustExist('wallets', a.wallet_id);
-        if (a.end_date && a.end_date < a.start_date) throw new Error('The schedule end date must not precede its start date.');
+        if (a.end_date && a.end_date < a.start_date)
+          throw new Error(
+            'The schedule end date must not precede its start date.',
+          );
         if (a.kind === 'expense') {
-          if (!a.category_id || a.source !== null) throw new Error('A recurring bill needs a category and source must be null.');
+          if (!a.category_id || a.source !== null)
+            throw new Error(
+              'A recurring bill needs a category and source must be null.',
+            );
           await this.mustExist('categories', a.category_id);
-        } else if (!a.source || a.category_id !== null) throw new Error('A recurring deposit needs a source and category must be null.');
+        } else if (!a.source || a.category_id !== null)
+          throw new Error(
+            'A recurring deposit needs a source and category must be null.',
+          );
         if ('id' in a) {
-          const old = await this.db.getFirstAsync<Recurring>('SELECT * FROM recurring WHERE id=?', a.id);
+          const old = this.orm
+            .select()
+            .from(t.recurring)
+            .where(eq(t.recurring.id, a.id))
+            .get();
           if (!old) throw new Error('Schedule no longer exists.');
-          if (old.next_index > 0 && (old.start_date !== a.start_date || old.frequency !== a.frequency || old.kind !== a.kind)) throw new Error('Start date, frequency, and kind cannot change after an occurrence was handled. Create a new schedule instead.');
+          if (
+            old.next_index > 0 &&
+            (old.start_date !== a.start_date ||
+              old.frequency !== a.frequency ||
+              old.kind !== a.kind)
+          )
+            throw new Error(
+              'Start date, frequency, and kind cannot change after an occurrence was handled. Create a new schedule instead.',
+            );
         }
-        return { title: call.name === 'create_recurring' ? 'Create recurring schedule' : 'Update recurring schedule', details: [a.description, `${a.kind === 'income' ? '+' : '-'}${money(cents, currency)} · ${w.name}`, `${a.frequency} from ${a.start_date}${a.end_date ? ` through ${a.end_date}` : ''}`, 'Due entries need confirmation. Creating a schedule does not record a payment.'], destructive: false };
+        return {
+          title:
+            call.name === 'create_recurring'
+              ? 'Create recurring schedule'
+              : 'Update recurring schedule',
+          details: [
+            a.description,
+            `${a.kind === 'income' ? '+' : '-'}${money(cents, currency)} · ${w.name}`,
+            `${a.frequency} from ${a.start_date}${a.end_date ? ` through ${a.end_date}` : ''}`,
+            'Due entries need confirmation. Creating a schedule does not record a payment.',
+          ],
+          destructive: false,
+        };
       }
-      case 'set_recurring_enabled': case 'delete_recurring': {
+      case 'set_recurring_enabled':
+      case 'delete_recurring': {
         const rule = await this.mustExist('recurring', call.arguments.id);
-        return { title: call.name === 'delete_recurring' ? 'Delete recurring schedule' : call.arguments.enabled ? 'Resume schedule' : 'Pause schedule', details: [rule.description!, 'Previously recorded transactions stay in your history.'], destructive: call.name === 'delete_recurring' };
+        return {
+          title:
+            call.name === 'delete_recurring'
+              ? 'Delete recurring schedule'
+              : call.arguments.enabled
+                ? 'Resume schedule'
+                : 'Pause schedule',
+          details: [
+            rule.description!,
+            'Previously recorded transactions stay in your history.',
+          ],
+          destructive: call.name === 'delete_recurring',
+        };
       }
-      case 'post_recurring': case 'skip_recurring': {
-        const rule = (await this.schedules()).find(r => r.id === call.arguments.id);
+      case 'post_recurring':
+      case 'skip_recurring': {
+        const rule = (await this.schedules()).find(
+          (r) => r.id === call.arguments.id,
+        );
         if (!rule) throw new Error('Schedule no longer exists.');
-        if (!rule.due || rule.next_date !== call.arguments.date) throw new Error('Only the next enabled, due occurrence can be recorded or skipped. Refresh the schedule.');
-        if (await this.db.getFirstAsync('SELECT date FROM recurring_occurrences WHERE recurring_id=? AND date=?', rule.id, call.arguments.date)) throw new Error('This occurrence was already handled.');
-        return { title: call.name === 'skip_recurring' ? 'Skip due occurrence' : rule.kind === 'income' ? 'Record received deposit' : 'Record paid bill',
-          details: [rule.description, `${rule.kind === 'income' ? '+' : '-'}${money(rule.amount_cents, currency)} · ${rule.wallet_name}`, call.arguments.date,
-            call.name === 'skip_recurring' ? 'No balance change.' : 'Only records this transaction; no bank transfer or bill payment is made.'], destructive: call.name === 'skip_recurring' };
+        if (!rule.due || rule.next_date !== call.arguments.date)
+          throw new Error(
+            'Only the next enabled, due occurrence can be recorded or skipped. Refresh the schedule.',
+          );
+        if (
+          this.orm
+            .select()
+            .from(t.recurringOccurrences)
+            .where(
+              and(
+                eq(t.recurringOccurrences.recurring_id, rule.id),
+                eq(t.recurringOccurrences.date, call.arguments.date),
+              ),
+            )
+            .get()
+        )
+          throw new Error('This occurrence was already handled.');
+        return {
+          title:
+            call.name === 'skip_recurring'
+              ? 'Skip due occurrence'
+              : rule.kind === 'income'
+                ? 'Record received deposit'
+                : 'Record paid bill',
+          details: [
+            rule.description,
+            `${rule.kind === 'income' ? '+' : '-'}${money(rule.amount_cents, currency)} · ${rule.wallet_name}`,
+            call.arguments.date,
+            call.name === 'skip_recurring'
+              ? 'No balance change.'
+              : 'Only records this transaction; no bank transfer or bill payment is made.',
+          ],
+          destructive: call.name === 'skip_recurring',
+        };
       }
     }
   }
   propose(input: WriteCall) {
     const call = toolSchema.parse(input);
     if (!isWrite(call)) throw new Error('This is a read operation.');
-    return this.serial(async (): Promise<Proposal> => ({ call, revision: Number(await this.setting('revision')), ...await this.inspect(call) }));
+    return this.serial(async (): Promise<Proposal> => ({
+      call,
+      revision: Number(await this.setting('revision')),
+      ...(await this.inspect(call)),
+    }));
   }
   apply(proposal: Proposal) {
     return this.serial(async () => {
       let result = '';
       await this.db.withTransactionAsync(async () => {
-        if (Number(await this.setting('revision')) !== proposal.revision) throw new Error('Your data changed since this proposal. Review the updated details and try again.');
+        if (Number(await this.setting('revision')) !== proposal.revision)
+          throw new Error(
+            'Your data changed since this proposal. Review the updated details and try again.',
+          );
         const call = toolSchema.parse(proposal.call);
         if (!isWrite(call)) throw new Error('Expected a change.');
         const preview = await this.inspect(call);
         switch (call.name) {
-          case 'configure_tracking': await this.db.runAsync("UPDATE settings SET value=? WHERE key='currency'", call.arguments.currency); break;
-          case 'create_wallet': await this.db.runAsync('INSERT INTO wallets (name,opening_cents) VALUES (?,?)', call.arguments.name, toCents(call.arguments.opening_balance, true)); break;
-          case 'update_wallet': await this.db.runAsync('UPDATE wallets SET name=?,opening_cents=? WHERE id=?', call.arguments.name, toCents(call.arguments.opening_balance, true), call.arguments.id); break;
-          case 'delete_wallet': await this.db.runAsync('DELETE FROM wallets WHERE id=?', call.arguments.id); break;
-          case 'create_category': await this.db.runAsync('INSERT INTO categories (name) VALUES (?)', call.arguments.name); break;
-          case 'create_expense': {
-            const a = call.arguments;
-            await this.db.runAsync('INSERT INTO expenses (wallet_id,category_id,amount_cents,description,date) VALUES (?,?,?,?,?)', a.wallet_id, a.category_id, toCents(a.amount), a.description, a.date); break;
-          }
+          case 'configure_tracking':
+            this.setSetting('currency', call.arguments.currency);
+            break;
+          case 'create_wallet':
+            this.orm
+              .insert(t.wallets)
+              .values({
+                name: call.arguments.name,
+                opening_cents: toCents(call.arguments.opening_balance, true),
+              })
+              .run();
+            break;
+          case 'update_wallet':
+            this.orm
+              .update(t.wallets)
+              .set({
+                name: call.arguments.name,
+                opening_cents: toCents(call.arguments.opening_balance, true),
+              })
+              .where(eq(t.wallets.id, call.arguments.id))
+              .run();
+            break;
+          case 'delete_wallet':
+            this.orm
+              .delete(t.wallets)
+              .where(eq(t.wallets.id, call.arguments.id))
+              .run();
+            break;
+          case 'create_category':
+            this.orm.insert(t.categories).values(call.arguments).run();
+            break;
+          case 'create_expense':
           case 'update_expense': {
             const a = call.arguments;
-            await this.db.runAsync('UPDATE expenses SET wallet_id=?,category_id=?,amount_cents=?,description=?,date=? WHERE id=?', a.wallet_id, a.category_id, toCents(a.amount), a.description, a.date, a.id); break;
-          }
-          case 'delete_expense': await this.db.runAsync('DELETE FROM expenses WHERE id=?', call.arguments.id); break;
-          case 'create_income': {
-            const a = call.arguments;
-            await this.db.runAsync('INSERT INTO incomes (wallet_id,amount_cents,source,description,date) VALUES (?,?,?,?,?)', a.wallet_id, toCents(a.amount), a.source, a.description, a.date); break;
-          }
-          case 'update_income': {
-            const a = call.arguments;
-            await this.db.runAsync('UPDATE incomes SET wallet_id=?,amount_cents=?,source=?,description=?,date=? WHERE id=?', a.wallet_id, toCents(a.amount), a.source, a.description, a.date, a.id); break;
-          }
-          case 'delete_income': await this.db.runAsync('DELETE FROM incomes WHERE id=?', call.arguments.id); break;
-          case 'create_recurring': case 'update_recurring': {
-            const a = call.arguments;
-            const params = [a.kind, a.wallet_id, a.category_id, a.source, toCents(a.amount), a.description, a.start_date, a.frequency, a.end_date];
-            if ('id' in a) await this.db.runAsync('UPDATE recurring SET kind=?,wallet_id=?,category_id=?,source=?,amount_cents=?,description=?,start_date=?,frequency=?,end_date=? WHERE id=?', ...params, a.id);
-            else await this.db.runAsync('INSERT INTO recurring (kind,wallet_id,category_id,source,amount_cents,description,start_date,frequency,end_date) VALUES (?,?,?,?,?,?,?,?,?)', ...params);
+            const value = {
+              wallet_id: a.wallet_id,
+              category_id: a.category_id,
+              amount_cents: toCents(a.amount),
+              description: a.description,
+              date: a.date,
+            };
+            if ('id' in a)
+              this.orm
+                .update(t.expenses)
+                .set(value)
+                .where(eq(t.expenses.id, a.id))
+                .run();
+            else this.orm.insert(t.expenses).values(value).run();
             break;
           }
-          case 'set_recurring_enabled': await this.db.runAsync('UPDATE recurring SET enabled=? WHERE id=?', call.arguments.enabled ? 1 : 0, call.arguments.id); break;
-          case 'delete_recurring': await this.db.runAsync('DELETE FROM recurring WHERE id=?', call.arguments.id); break;
-          case 'post_recurring': case 'skip_recurring': {
+          case 'delete_expense':
+            this.orm
+              .delete(t.expenses)
+              .where(eq(t.expenses.id, call.arguments.id))
+              .run();
+            break;
+          case 'create_income':
+          case 'update_income': {
             const a = call.arguments;
-            const rule = (await this.db.getFirstAsync<Recurring>('SELECT * FROM recurring WHERE id=?', a.id))!;
+            const value = {
+              wallet_id: a.wallet_id,
+              amount_cents: toCents(a.amount),
+              source: a.source,
+              description: a.description,
+              date: a.date,
+            };
+            if ('id' in a)
+              this.orm
+                .update(t.incomes)
+                .set(value)
+                .where(eq(t.incomes.id, a.id))
+                .run();
+            else this.orm.insert(t.incomes).values(value).run();
+            break;
+          }
+          case 'delete_income':
+            this.orm
+              .delete(t.incomes)
+              .where(eq(t.incomes.id, call.arguments.id))
+              .run();
+            break;
+          case 'create_recurring':
+          case 'update_recurring': {
+            const a = call.arguments;
+            const value = {
+              kind: a.kind,
+              wallet_id: a.wallet_id,
+              category_id: a.category_id,
+              source: a.source,
+              amount_cents: toCents(a.amount),
+              description: a.description,
+              start_date: a.start_date,
+              frequency: a.frequency,
+              end_date: a.end_date,
+            };
+            if ('id' in a)
+              this.orm
+                .update(t.recurring)
+                .set(value)
+                .where(eq(t.recurring.id, a.id))
+                .run();
+            else this.orm.insert(t.recurring).values(value).run();
+            break;
+          }
+          case 'set_recurring_enabled':
+            this.orm
+              .update(t.recurring)
+              .set({ enabled: call.arguments.enabled ? 1 : 0 })
+              .where(eq(t.recurring.id, call.arguments.id))
+              .run();
+            break;
+          case 'delete_recurring':
+            this.orm
+              .delete(t.recurring)
+              .where(eq(t.recurring.id, call.arguments.id))
+              .run();
+            break;
+          case 'post_recurring':
+          case 'skip_recurring': {
+            const a = call.arguments;
+            const rule = this.orm
+              .select()
+              .from(t.recurring)
+              .where(eq(t.recurring.id, a.id))
+              .get()!;
             if (call.name === 'post_recurring') {
-              if (rule.kind === 'income') await this.db.runAsync('INSERT INTO incomes (wallet_id,amount_cents,source,description,date,recurring_id) VALUES (?,?,?,?,?,?)', rule.wallet_id, rule.amount_cents, rule.source, rule.description, a.date, rule.id);
-              else await this.db.runAsync('INSERT INTO expenses (wallet_id,category_id,amount_cents,description,date,recurring_id) VALUES (?,?,?,?,?,?)', rule.wallet_id, rule.category_id, rule.amount_cents, rule.description, a.date, rule.id);
+              const value = {
+                wallet_id: rule.wallet_id,
+                amount_cents: rule.amount_cents,
+                description: rule.description,
+                date: a.date,
+                recurring_id: rule.id,
+              };
+              if (rule.kind === 'income')
+                this.orm
+                  .insert(t.incomes)
+                  .values({ ...value, source: rule.source! })
+                  .run();
+              else
+                this.orm
+                  .insert(t.expenses)
+                  .values({ ...value, category_id: rule.category_id! })
+                  .run();
             }
-            await this.db.runAsync('INSERT INTO recurring_occurrences (recurring_id,date,status) VALUES (?,?,?)', rule.id, a.date, call.name === 'post_recurring' ? 'posted' : 'skipped');
-            await this.db.runAsync('UPDATE recurring SET next_index=next_index+1 WHERE id=?', rule.id); break;
+            this.orm
+              .insert(t.recurringOccurrences)
+              .values({
+                recurring_id: rule.id,
+                date: a.date,
+                status: call.name === 'post_recurring' ? 'posted' : 'skipped',
+              })
+              .run();
+            this.orm
+              .update(t.recurring)
+              .set({ next_index: sql`${t.recurring.next_index}+1` })
+              .where(eq(t.recurring.id, rule.id))
+              .run();
+            break;
           }
         }
-        await this.db.runAsync("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
+        this.orm
+          .update(t.settings)
+          .set({ value: sql`CAST(${t.settings.value} AS INTEGER)+1` })
+          .where(eq(t.settings.key, 'revision'))
+          .run();
         result = `${preview.title}: ${preview.details.join(' · ')}. Saved on this device.`;
       });
       return result;
@@ -246,7 +827,16 @@ export class Repository {
   }
 }
 
-export function walletArguments(w: Wallet) { return { id: w.id, name: w.name, opening_balance: decimal(w.opening_cents) }; }
+export function walletArguments(w: Wallet) {
+  return { id: w.id, name: w.name, opening_balance: decimal(w.opening_cents) };
+}
 export function expenseArguments(e: Expense) {
-  return { id: e.id, wallet_id: e.wallet_id, category_id: e.category_id, amount: decimal(e.amount_cents), description: e.description, date: e.date };
+  return {
+    id: e.id,
+    wallet_id: e.wallet_id,
+    category_id: e.category_id,
+    amount: decimal(e.amount_cents),
+    description: e.description,
+    date: e.date,
+  };
 }

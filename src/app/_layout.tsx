@@ -11,12 +11,28 @@ import { AiProvider } from '@/lib/ai/provider';
 export { ErrorBoundary } from 'expo-router';
 
 export default function Layout() {
-  return <SafeAreaProvider>
-    <StatusBar style="dark" />
-    <Suspense fallback={<View className="flex-1 items-center justify-center bg-background"><ActivityIndicator color="#176b50" /></View>}>
-      <SQLiteProvider databaseName="pocket-ledger.db" onInit={migrate} useSuspense>
-        <DataProvider><AiProvider><Stack screenOptions={{ headerShown: false }} /></AiProvider></DataProvider>
-      </SQLiteProvider>
-    </Suspense>
-  </SafeAreaProvider>;
+  return (
+    <SafeAreaProvider>
+      <StatusBar style="dark" />
+      <Suspense
+        fallback={
+          <View className="flex-1 items-center justify-center bg-background">
+            <ActivityIndicator color="#176b50" />
+          </View>
+        }
+      >
+        <SQLiteProvider
+          databaseName="pocket-ledger.db"
+          onInit={migrate}
+          useSuspense
+        >
+          <DataProvider>
+            <AiProvider>
+              <Stack screenOptions={{ headerShown: false }} />
+            </AiProvider>
+          </DataProvider>
+        </SQLiteProvider>
+      </Suspense>
+    </SafeAreaProvider>
+  );
 }

@@ -7,8 +7,8 @@ An Android-first personal expense tracker with an online AI assistant using Open
 - Expo SDK 57, React Native 0.86, TypeScript, and Expo Router.
 - NativeWind 4 with Tailwind CSS 3.
 - React Native Reusables: shadcn-style Button, Text, Card, and Input components adapted for React Native. Upstream attribution is in `THIRD_PARTY_NOTICES.md`.
-- `expo-sqlite`: local wallets, categories, expenses, income, and recurring schedules.
-- LangChain (`@langchain/core` and `@langchain/openai`) native function calling through OpenRouter or a configurable OpenAI-compatible provider.
+- Drizzle ORM with `expo-sqlite`: local wallets, categories, expenses, income, and recurring schedules; generated, versioned migrations.
+- LangChain `createAgent`, `tool`, and human-in-the-loop middleware, using `ChatOpenAI` (`@langchain/openai`) through OpenRouter or a configurable OpenAI-compatible provider. No custom agent loop or JSON inference adapter. Metro selects the published web runtimes; two small Babel adapters make the optional provider loader statically resolvable and pass the task config to HITL interrupts without Node's `async_hooks`. LangChain's agent and review logic stay upstream.
 - `expo-secure-store`: encrypted provider credentials on Android/iOS; browser credentials are kept only in memory.
 
 ## Features
@@ -25,7 +25,7 @@ The assistant has tools to configure tracking, create/update/delete wallets, cre
 - “How much did I receive and spend this month?”
 - “Change my lunch expense from today to 300 pesos.”
 
-Native function arguments are validated with Zod. LangChain preserves tool-call IDs and returns local read results to the model. Unknown or malformed actions, truncated responses, and batches containing writes are rejected. Every assistant write is shown as a proposal with the actual amount, wallet, and date. Applying it rechecks the data revision and performs a parameterized SQLite transaction. Invalid actions do not change data. Wallet deletion is blocked while it has expenses, income, or recurring schedules. The assistant handles one proposed change at a time and is instructed to ask for clarification; model accuracy depends on the selected provider/model.
+Native function arguments are validated with Zod. LangChain preserves tool-call IDs and returns local read results to the model. Unknown or malformed actions, truncated responses, and batches containing writes are rejected. Every assistant write is shown as a proposal with the actual amount, wallet, and date. LangChain pauses each write with its human-in-the-loop middleware. Approval resumes that same tool call, rechecks the original data revision, and performs a parameterized Drizzle transaction. Rejection saves nothing. Saving or cancelling a review does not make another provider request. Invalid actions do not change data. Wallet deletion is blocked while it has expenses, income, or recurring schedules. The assistant handles one proposed change at a time and is instructed to ask for clarification; model accuracy depends on the selected provider/model.
 
 ## Develop
 
@@ -36,11 +36,12 @@ Use Node.js 24 and npm:
 NODE_USE_ENV_PROXY=1 npm ci
 npm run typecheck
 npm run lint
+npm run format:check
 npm test
 npm run build
 ```
 
-`npm run build` exports JavaScript and assets for Android, iOS, and web; it does not produce an APK. The tests exercise real SQLite through Node's `node:sqlite`, including preserved v1 migration, wallet/expense/income CRUD, exact balances, date-clamped recurrence, confirmation and duplicate protection, pause/skip/end dates, validation, stale proposals, separate model/key storage, native LangChain requests and matching tool-call IDs, provider failures, and cancellation. Provider tests use injected HTTP responses; they do not claim a live model or physical Android runtime was tested.
+`npm run build` exports JavaScript and assets for Android, iOS, and web; it does not produce an APK. The tests exercise real SQLite through Node's `node:sqlite`, including preserved v1/v2 migrations and the Drizzle migration journal, wallet/expense/income CRUD, exact balances, date-clamped recurrence, confirmation and duplicate protection, pause/skip/end dates, validation, stale proposals, separate model/key storage, native LangChain requests and matching tool-call IDs, provider failures, and cancellation. Provider tests use injected HTTP responses; they do not claim a live model or physical Android runtime was tested.
 
 ### Android development build
 
@@ -70,7 +71,7 @@ cd android
 ./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a
 ```
 
-The result is `android/app/build/outputs/apk/release/app-release.apk`. The generated release variant uses a development signing key for personal testing. Keep the same signing key for in-place updates; production/store releases need private signing. Generated native directories and APKs are not committed. Version 1.2 uses Android versionCode 3 and migrates the existing SQLite database without resetting wallets or expense history. Update the existing app with the same signing key; do not uninstall if you want to keep local data.
+The result is `android/app/build/outputs/apk/release/app-release.apk`. The generated release variant uses a development signing key for personal testing. Keep the same signing key for in-place updates; production/store releases need private signing. Generated native directories and APKs are not committed. Version 1.3 uses Android versionCode 4 and migrates the existing SQLite database without resetting wallets or expense history. Update the existing app with the same signing key; do not uninstall if you want to keep local data.
 
 ### Connect online AI
 
@@ -86,13 +87,27 @@ The app supplies native tool schemas through LangChain and validates each return
 
 ### Remove an old downloaded model
 
-Version 1.1 no longer imports or runs local models. If version 1.0 imported one, **Settings → Previously imported model → Delete saved model** deletes only the private app copy at `documents/models/model-<timestamp>.gguf`, after confirmation. Wallets and expenses are retained. The original downloaded file remains in Downloads and can be removed separately in the phone's file manager. If you only downloaded a model without importing it, there is no app copy to delete. Expo Go keeps its project data in its own sandbox; use the same installation/project to access an old copy.
+Versions 1.1 and later no longer imports or runs local models. If version 1.0 imported one, **Settings → Previously imported model → Delete saved model** deletes only the private app copy at `documents/models/model-<timestamp>.gguf`, after confirmation. Wallets and expenses are retained. The original downloaded file remains in Downloads and can be removed separately in the phone's file manager. If you only downloaded a model without importing it, there is no app copy to delete. Expo Go keeps its project data in its own sandbox; use the same installation/project to access an old copy.
 
 ## Data and limitations
 
-SQLite is local to the app; AI requests are sent to your chosen online provider. Android automatic backup is disabled. Chat history lasts only for the current app session. SQLite is not encrypted at the application layer. Uninstalling the app removes its local data; data export, backup, wallet transfers, background reminders, and multi-currency conversion are not implemented. Due schedules refresh on app foregrounding and while the app is open; there is no background posting.
+SQLite is local to the app; AI requests are sent to your chosen online provider. Android automatic backup is disabled. Chat history lasts only for the current app session. LangChain uses an in-memory `MemorySaver` checkpoint to pause and resume a pending review. Each turn owns its checkpoint, which is released after approval/rejection; restarting the app discards chats and pending reviews. No persistent conversation/checkpoint tables or services are needed for this workflow. SQLite is not encrypted at the application layer. Uninstalling the app removes its local data; data export, backup, wallet transfers, background reminders, and multi-currency conversion are not implemented. Due schedules refresh on app foregrounding and while the app is open; there is no background posting.
 
-The web app supports manual tracking through SQLite WASM/OPFS. Its server must send `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`; Metro is configured to do so. Online AI is available in the browser when the provider allows browser CORS requests; its key is not persisted. Browser checks verified wallet/expense CRUD and NativeWind styling, then the 1.2 flows for separate key/model saving without requests, LangChain-reviewed salary entry, manual allowance, bills awaiting confirmation, pause/resume, model changes without a new key, and SQLite balances after reload. Provider responses were intercepted test data. Lint, typecheck, 33 tests, all-platform exports, and the local ARM64 APK build passed. The APK uses versionCode 3 and the same development certificate as prior local releases.
+The web app supports manual tracking through SQLite WASM/OPFS. Its server must send `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`; Metro is configured to do so. Online AI is available in the browser when the provider allows browser CORS requests; its key is not persisted. Validation for version 1.3 passed: 30 Node SQLite/agent/provider tests, typecheck, lint, Prettier checks, and Android/iOS/web exports. Chromium checks passed on Metro and the production export, including native LangChain approve/reject, read results, wallet/salary writes, manual allowance, due bill confirmation, pause/resume, separate model/key saving, and balances after reload. Provider responses were intercepted test data. The local ARM64 APK built without EAS, with versionCode 4 and the same development certificate as earlier versions. Live provider inference and the physical phone runtime require your account/device and have not been verified here.
+
+## Database migrations and formatting
+
+Edit `src/data/tables.ts`, then run:
+
+```sh
+npm run db:generate
+npm run format
+npm run format:check
+```
+
+Commit the generated SQL and metadata in `drizzle/` and the bundled `src/data/migrations.ts`. Drizzle Kit generates the schema changes; the bundling script embeds the same SQL/journal for Expo and tests, without filesystem access or a Babel SQL loader at runtime. Do not edit or regenerate an already-applied baseline migration. The app runs Drizzle's Expo SQLite migrator before showing screens. Existing v1/v2 databases are adopted once, preserving data, ids, recurring history, and preferences. Prisma is not used: Drizzle supports the existing Expo SQLite connection directly.
+
+`.prettierrc.json` contains the requested 80-column, two-space, single-quote settings and one JSX attribute per line. Generated/native files and binary assets are excluded in `.prettierignore`.
 
 ## Cloud environment
 

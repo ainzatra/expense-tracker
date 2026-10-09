@@ -5,11 +5,39 @@ config.resolver.assetExts.push('wasm');
 // LangSmith's ESM barrel has a circular Client initialization in Metro.
 // Use its published CommonJS entry points and browser filesystem adapters.
 config.resolver.resolveRequest = (context, moduleName, platform) => {
-  if (moduleName === 'langsmith' || moduleName.startsWith('langsmith/')) {
-    return context.resolveRequest({ ...context, isESMImport: false, unstable_conditionNames: ['require'], unstable_conditionsByPlatform: {} }, moduleName, platform);
+  // React Native has no node:async_hooks; use the packages' web runtimes.
+  if (moduleName === '@langchain/langgraph' || moduleName === 'langchain') {
+    return context.resolveRequest(
+      {
+        ...context,
+        unstable_conditionNames: ['browser'],
+        unstable_conditionsByPlatform: {},
+      },
+      moduleName,
+      platform,
+    );
   }
-  if (context.originModulePath.includes('/langsmith/') && /\/(fs|worker_threads)\.cjs$/.test(moduleName)) {
-    return context.resolveRequest(context, moduleName.replace('.cjs', '.browser.cjs'), platform);
+  if (moduleName === 'langsmith' || moduleName.startsWith('langsmith/')) {
+    return context.resolveRequest(
+      {
+        ...context,
+        isESMImport: false,
+        unstable_conditionNames: ['require'],
+        unstable_conditionsByPlatform: {},
+      },
+      moduleName,
+      platform,
+    );
+  }
+  if (
+    context.originModulePath.includes('/langsmith/') &&
+    /\/(fs|worker_threads)\.cjs$/.test(moduleName)
+  ) {
+    return context.resolveRequest(
+      context,
+      moduleName.replace('.cjs', '.browser.cjs'),
+      platform,
+    );
   }
   return context.resolveRequest(context, moduleName, platform);
 };
@@ -22,4 +50,7 @@ config.server.enhanceMiddleware = (middleware, server) => {
     return next(request, response, done);
   };
 };
-module.exports = withNativeWind(config, { input: './global.css', inlineRem: 16 });
+module.exports = withNativeWind(config, {
+  input: './global.css',
+  inlineRem: 16,
+});

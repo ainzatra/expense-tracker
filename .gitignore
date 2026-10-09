@@ -39,3 +39,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Drizzle Kit loader is replaced by the generated TypeScript SQL bundle.
+/drizzle/migrations.js

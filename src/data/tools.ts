@@ -2,48 +2,148 @@ import { z } from 'zod';
 import { CURRENCIES, validDay } from '../lib/money';
 import { FREQUENCIES } from '../lib/recurrence';
 
-const id = z.number().int().positive('Choose an existing wallet, category, or expense.').max(Number.MAX_SAFE_INTEGER);
-const name = z.string().trim().min(1, 'Enter a name.').max(60, 'Keep names within 60 characters.');
+const id = z
+  .number()
+  .int()
+  .positive('Choose an existing wallet, category, or expense.')
+  .max(Number.MAX_SAFE_INTEGER);
+const name = z
+  .string()
+  .trim()
+  .min(1, 'Enter a name.')
+  .max(60, 'Keep names within 60 characters.');
 const amount = z.string().trim().max(16);
 const day = z.string().refine(validDay, 'Use a valid YYYY-MM-DD date.');
 const wallet = z.strictObject({ name, opening_balance: amount });
-const expense = z.strictObject({ wallet_id: id, category_id: id, amount, description: z.string().trim().min(1, 'Enter an expense description.').max(200, 'Keep descriptions within 200 characters.'), date: day });
-const income = z.strictObject({ wallet_id: id, amount, source: name, description: z.string().trim().min(1).max(200), date: day });
-const recurring = z.strictObject({ kind: z.enum(['income', 'expense']), wallet_id: id, category_id: id.nullable(), source: name.nullable(), amount,
-  description: z.string().trim().min(1).max(200), start_date: day, frequency: z.enum(FREQUENCIES), end_date: day.nullable() });
-const filters = z.strictObject({ wallet_id: id.optional(), start: day.optional(), end: day.optional(),
-  limit: z.number().int().min(1).max(50).optional(), offset: z.number().int().min(0).max(100000).optional() });
+const expense = z.strictObject({
+  wallet_id: id,
+  category_id: id,
+  amount,
+  description: z
+    .string()
+    .trim()
+    .min(1, 'Enter an expense description.')
+    .max(200, 'Keep descriptions within 200 characters.'),
+  date: day,
+});
+const income = z.strictObject({
+  wallet_id: id,
+  amount,
+  source: name,
+  description: z.string().trim().min(1).max(200),
+  date: day,
+});
+const recurring = z.strictObject({
+  kind: z.enum(['income', 'expense']),
+  wallet_id: id,
+  category_id: id.nullable(),
+  source: name.nullable(),
+  amount,
+  description: z.string().trim().min(1).max(200),
+  start_date: day,
+  frequency: z.enum(FREQUENCIES),
+  end_date: day.nullable(),
+});
+const filters = z.strictObject({
+  wallet_id: id.optional(),
+  start: day.optional(),
+  end: day.optional(),
+  limit: z.number().int().min(1).max(50).optional(),
+  offset: z.number().int().min(0).max(100000).optional(),
+});
 export const toolSchema = z.discriminatedUnion('name', [
-  z.strictObject({ name: z.literal('configure_tracking'), arguments: z.strictObject({ currency: z.enum(CURRENCIES) }) }),
+  z.strictObject({
+    name: z.literal('configure_tracking'),
+    arguments: z.strictObject({ currency: z.enum(CURRENCIES) }),
+  }),
   z.strictObject({ name: z.literal('create_wallet'), arguments: wallet }),
-  z.strictObject({ name: z.literal('update_wallet'), arguments: wallet.extend({ id }) }),
-  z.strictObject({ name: z.literal('delete_wallet'), arguments: z.strictObject({ id }) }),
-  z.strictObject({ name: z.literal('create_category'), arguments: z.strictObject({ name }) }),
+  z.strictObject({
+    name: z.literal('update_wallet'),
+    arguments: wallet.extend({ id }),
+  }),
+  z.strictObject({
+    name: z.literal('delete_wallet'),
+    arguments: z.strictObject({ id }),
+  }),
+  z.strictObject({
+    name: z.literal('create_category'),
+    arguments: z.strictObject({ name }),
+  }),
   z.strictObject({ name: z.literal('create_expense'), arguments: expense }),
-  z.strictObject({ name: z.literal('update_expense'), arguments: expense.extend({ id }) }),
-  z.strictObject({ name: z.literal('delete_expense'), arguments: z.strictObject({ id }) }),
+  z.strictObject({
+    name: z.literal('update_expense'),
+    arguments: expense.extend({ id }),
+  }),
+  z.strictObject({
+    name: z.literal('delete_expense'),
+    arguments: z.strictObject({ id }),
+  }),
   z.strictObject({ name: z.literal('create_income'), arguments: income }),
-  z.strictObject({ name: z.literal('update_income'), arguments: income.extend({ id }) }),
-  z.strictObject({ name: z.literal('delete_income'), arguments: z.strictObject({ id }) }),
+  z.strictObject({
+    name: z.literal('update_income'),
+    arguments: income.extend({ id }),
+  }),
+  z.strictObject({
+    name: z.literal('delete_income'),
+    arguments: z.strictObject({ id }),
+  }),
   z.strictObject({ name: z.literal('create_recurring'), arguments: recurring }),
-  z.strictObject({ name: z.literal('update_recurring'), arguments: recurring.extend({ id }) }),
-  z.strictObject({ name: z.literal('set_recurring_enabled'), arguments: z.strictObject({ id, enabled: z.boolean() }) }),
-  z.strictObject({ name: z.literal('delete_recurring'), arguments: z.strictObject({ id }) }),
-  z.strictObject({ name: z.literal('post_recurring'), arguments: z.strictObject({ id, date: day }) }),
-  z.strictObject({ name: z.literal('skip_recurring'), arguments: z.strictObject({ id, date: day }) }),
-  z.strictObject({ name: z.literal('list_recurring'), arguments: z.strictObject({}) }),
+  z.strictObject({
+    name: z.literal('update_recurring'),
+    arguments: recurring.extend({ id }),
+  }),
+  z.strictObject({
+    name: z.literal('set_recurring_enabled'),
+    arguments: z.strictObject({ id, enabled: z.boolean() }),
+  }),
+  z.strictObject({
+    name: z.literal('delete_recurring'),
+    arguments: z.strictObject({ id }),
+  }),
+  z.strictObject({
+    name: z.literal('post_recurring'),
+    arguments: z.strictObject({ id, date: day }),
+  }),
+  z.strictObject({
+    name: z.literal('skip_recurring'),
+    arguments: z.strictObject({ id, date: day }),
+  }),
+  z.strictObject({
+    name: z.literal('list_recurring'),
+    arguments: z.strictObject({}),
+  }),
   z.strictObject({ name: z.literal('list_incomes'), arguments: filters }),
-  z.strictObject({ name: z.literal('list_wallets'), arguments: z.strictObject({}) }),
+  z.strictObject({
+    name: z.literal('list_wallets'),
+    arguments: z.strictObject({}),
+  }),
   z.strictObject({ name: z.literal('list_expenses'), arguments: filters }),
-  z.strictObject({ name: z.literal('get_summary'), arguments: z.strictObject({ start: day, end: day }) }),
+  z.strictObject({
+    name: z.literal('get_summary'),
+    arguments: z.strictObject({ start: day, end: day }),
+  }),
 ]);
 export type ToolCall = z.infer<typeof toolSchema>;
-export type WriteCall = Exclude<ToolCall, { name: 'list_wallets' | 'list_expenses' | 'list_incomes' | 'list_recurring' | 'get_summary' }>;
+export type WriteCall = Exclude<
+  ToolCall,
+  {
+    name:
+      | 'list_wallets'
+      | 'list_expenses'
+      | 'list_incomes'
+      | 'list_recurring'
+      | 'get_summary';
+  }
+>;
 export function isWrite(call: ToolCall): call is WriteCall {
-  return !['list_wallets', 'list_expenses', 'list_incomes', 'list_recurring', 'get_summary'].includes(call.name);
+  return ![
+    'list_wallets',
+    'list_expenses',
+    'list_incomes',
+    'list_recurring',
+    'get_summary',
+  ].includes(call.name);
 }
-export const agentOutputSchema = z.strictObject({ reply: z.string().max(600), tool: toolSchema.nullable() });
-export const outputJsonSchema = z.toJSONSchema(agentOutputSchema, { target: 'draft-7', unrepresentable: 'any' });
 
 export const TOOL_GUIDE = `
 configure_tracking {currency: "PHP"|"USD"|"EUR"|"GBP"|"SGD"|"AUD"|"CAD"}: set currency BEFORE any wallets exist.

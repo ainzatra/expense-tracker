@@ -1,82 +1,102 @@
-export const SCHEMA = `
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-INSERT OR IGNORE INTO settings VALUES ('currency', 'PHP'), ('revision', '0');
-CREATE TABLE IF NOT EXISTS wallets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-  opening_cents INTEGER NOT NULL CHECK(opening_cents >= 0 AND opening_cents <= 1000000000000)
-);
-CREATE TABLE IF NOT EXISTS categories (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL COLLATE NOCASE UNIQUE
-);
-INSERT OR IGNORE INTO categories (name) VALUES
-  ('Food & drink'), ('Transport'), ('Shopping'), ('Bills'), ('Health'), ('Other');
-CREATE TABLE IF NOT EXISTS expenses (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  wallet_id INTEGER NOT NULL REFERENCES wallets(id) ON DELETE RESTRICT,
-  category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
-  amount_cents INTEGER NOT NULL CHECK(amount_cents > 0 AND amount_cents <= 1000000000000),
-  description TEXT NOT NULL,
-  date TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-CREATE INDEX IF NOT EXISTS expenses_date_idx ON expenses(date DESC, id DESC);
-CREATE INDEX IF NOT EXISTS expenses_wallet_idx ON expenses(wallet_id);
-PRAGMA user_version = 1;
-`;
+import type { SQLiteDatabase } from 'expo-sqlite';
+import { sql } from 'drizzle-orm';
+import { migrate as migrateDrizzle } from 'drizzle-orm/expo-sqlite/migrator';
+import { createDatabase } from './database';
+import migrations from './migrations';
+import { SCHEMA_V2 } from './legacy-schema';
+import * as tables from './tables';
+export { SCHEMA } from './legacy-schema';
 
-export interface SqlClient {
+export interface SqlClient extends Pick<SQLiteDatabase, 'prepareSync'> {
   execAsync(sql: string): Promise<void>;
-  runAsync(sql: string, ...params: (string | number | null)[]): Promise<{ changes: number; lastInsertRowId: number }>;
-  getFirstAsync<T>(sql: string, ...params: (string | number | null)[]): Promise<T | null>;
-  getAllAsync<T>(sql: string, ...params: (string | number | null)[]): Promise<T[]>;
+  runAsync(
+    sql: string,
+    ...params: (string | number | null)[]
+  ): Promise<{ changes: number; lastInsertRowId: number }>;
+  getFirstAsync<T>(
+    sql: string,
+    ...params: (string | number | null)[]
+  ): Promise<T | null>;
+  getAllAsync<T>(
+    sql: string,
+    ...params: (string | number | null)[]
+  ): Promise<T[]>;
   withTransactionAsync(task: () => Promise<void>): Promise<void>;
 }
 
-export async function migrate(db: SqlClient) {
-  await db.execAsync('PRAGMA foreign_keys = ON;');
-  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  if ((version?.user_version ?? 0) > 2) throw new Error('This database requires a newer app version.');
-  if ((version?.user_version ?? 0) < 1) await db.withTransactionAsync(() => db.execAsync(SCHEMA));
-  if ((version?.user_version ?? 0) < 2) await db.withTransactionAsync(() => db.execAsync(SCHEMA_V2));
+export async function migrate(client: SqlClient) {
+  await client.execAsync('PRAGMA foreign_keys = ON;');
+  const version =
+    (
+      await client.getFirstAsync<{ user_version: number }>(
+        'PRAGMA user_version',
+      )
+    )?.user_version ?? 0;
+  if (version > 3)
+    throw new Error('This database requires a newer app version.');
+  const db = createDatabase(client);
+  if (version === 1)
+    await client.withTransactionAsync(() => client.execAsync(SCHEMA_V2));
+  if (version === 1 || version === 2) {
+    // Adopt the existing v2 schema once. Never replay CREATE TABLE over user data.
+    await client.withTransactionAsync(async () => {
+      for (const table of Object.values(tables))
+        db.select().from(table).limit(0).all();
+      db.run(
+        sql`CREATE TABLE IF NOT EXISTS __drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)`,
+      );
+      const latest = db.get<{ created_at: number }>(
+        sql`SELECT created_at FROM __drizzle_migrations ORDER BY created_at DESC LIMIT 1`,
+      );
+      if (!latest) {
+        db.run(
+          sql`CREATE UNIQUE INDEX IF NOT EXISTS wallets_name_unique ON wallets(name COLLATE NOCASE)`,
+        );
+        db.run(
+          sql`CREATE UNIQUE INDEX IF NOT EXISTS categories_name_unique ON categories(name COLLATE NOCASE)`,
+        );
+        db.run(
+          sql`INSERT INTO __drizzle_migrations(hash,created_at) VALUES('',${migrations.journal.entries[0].when})`,
+        );
+      }
+    });
+  }
+  const hasJournal = db.get(
+    sql`SELECT name FROM sqlite_master WHERE type='table' AND name='__drizzle_migrations'`,
+  );
+  if (hasJournal) {
+    const latest = db.get<{ created_at: number }>(
+      sql`SELECT created_at FROM __drizzle_migrations ORDER BY created_at DESC LIMIT 1`,
+    );
+    if (
+      latest &&
+      latest.created_at >
+        Math.max(...migrations.journal.entries.map((e) => e.when))
+    )
+      throw new Error('This database requires a newer app version.');
+  }
+  await migrateDrizzle(db, migrations);
+  db.transaction((tx) => {
+    tx.insert(tables.settings)
+      .values([
+        { key: 'currency', value: 'PHP' },
+        { key: 'revision', value: '0' },
+      ])
+      .onConflictDoNothing()
+      .run();
+    tx.insert(tables.categories)
+      .values(
+        [
+          'Food & drink',
+          'Transport',
+          'Shopping',
+          'Bills',
+          'Health',
+          'Other',
+        ].map((name) => ({ name })),
+      )
+      .onConflictDoNothing()
+      .run();
+  });
+  await client.execAsync('PRAGMA user_version = 3;');
 }
-
-export const SCHEMA_V2 = `
-CREATE TABLE recurring (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL CHECK(kind IN ('income','expense')),
-  wallet_id INTEGER NOT NULL REFERENCES wallets(id) ON DELETE RESTRICT,
-  category_id INTEGER REFERENCES categories(id) ON DELETE RESTRICT,
-  source TEXT,
-  amount_cents INTEGER NOT NULL CHECK(amount_cents > 0 AND amount_cents <= 1000000000000),
-  description TEXT NOT NULL,
-  start_date TEXT NOT NULL,
-  frequency TEXT NOT NULL CHECK(frequency IN ('daily','weekly','monthly','yearly')),
-  end_date TEXT,
-  next_index INTEGER NOT NULL DEFAULT 0 CHECK(next_index >= 0),
-  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
-  CHECK((kind='income' AND source IS NOT NULL AND category_id IS NULL) OR
-        (kind='expense' AND category_id IS NOT NULL AND source IS NULL))
-);
-CREATE TABLE incomes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  wallet_id INTEGER NOT NULL REFERENCES wallets(id) ON DELETE RESTRICT,
-  amount_cents INTEGER NOT NULL CHECK(amount_cents > 0 AND amount_cents <= 1000000000000),
-  source TEXT NOT NULL,
-  description TEXT NOT NULL,
-  date TEXT NOT NULL,
-  recurring_id INTEGER REFERENCES recurring(id) ON DELETE SET NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-ALTER TABLE expenses ADD COLUMN recurring_id INTEGER REFERENCES recurring(id) ON DELETE SET NULL;
-CREATE TABLE recurring_occurrences (
-  recurring_id INTEGER NOT NULL REFERENCES recurring(id) ON DELETE CASCADE,
-  date TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('posted','skipped')),
-  PRIMARY KEY (recurring_id,date)
-);
-CREATE INDEX incomes_date_idx ON incomes(date DESC,id DESC);
-CREATE INDEX incomes_wallet_idx ON incomes(wallet_id);
-PRAGMA user_version = 2;
-`;

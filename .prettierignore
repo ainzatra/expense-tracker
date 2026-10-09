@@ -1,0 +1,10 @@
+node_modules/
+android/
+ios/
+.expo/
+dist/
+assets/
+coverage/
+package-lock.json
+drizzle/
+src/data/migrations.ts

@@ -1,13 +1,15 @@
 {
   "name": "expense-tracker",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "main": "expo-router/entry",
   "dependencies": {
     "@langchain/core": "^1.2.17",
+    "@langchain/langgraph": "^1.4.21",
     "@langchain/openai": "^1.6.2",
     "@rn-primitives/slot": "^1.5.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "drizzle-orm": "^0.45.4",
     "expo": "~57.0.27",
     "expo-build-properties": "~57.0.22",
     "expo-constants": "~57.0.21",
@@ -20,6 +22,7 @@
     "expo-sqlite": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.4",
+    "langchain": "^1.5.16",
     "lucide-react-native": "^1.53.0",
     "nativewind": "4.2.7",
     "react": "19.2.3",
@@ -39,8 +42,10 @@
     "@types/node": "24",
     "@types/react": "~19.2.2",
     "babel-preset-expo": "^57.0.14",
+    "drizzle-kit": "^0.31.11",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~57.0.2",
+    "prettier": "^3.9.9",
     "tsx": "^4.23.15",
     "typescript": "~6.0.3"
   },
@@ -52,7 +57,10 @@
     "typecheck": "tsc --noEmit",
     "build": "expo export --platform all",
     "lint": "expo lint",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "db:generate": "drizzle-kit generate && tsx scripts/bundle-migrations.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "private": true
 }

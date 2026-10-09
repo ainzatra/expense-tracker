@@ -2,7 +2,7 @@
   "expo": {
     "name": "Pocket Ledger",
     "slug": "expense-tracker",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -18,7 +18,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.ainzatra.expensetracker",
-      "versionCode": 3,
+      "versionCode": 4,
       "allowBackup": false
     },
     "web": {
